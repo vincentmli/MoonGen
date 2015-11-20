@@ -2,11 +2,11 @@ local dpdk		= require "dpdk"
 local memory	= require "memory"
 local device	= require "device"
 local stats		= require "stats"
-local log 		= require "log"
+
 
 function master(txPorts, minIp, numIps, rate)
 	if not txPorts then
-		log:info("usage: txPort1[,txPort2[,...]] [minIP numIPs rate]")
+		printf("usage: txPort1[,txPort2[,...]] [minIP numIPs rate]")
 		return
 	end
 	txPorts = tostring(txPorts)
@@ -15,7 +15,7 @@ function master(txPorts, minIp, numIps, rate)
 	rate = rate or 0
 	for currentTxPort in txPorts:gmatch("(%d+),?") do
 		currentTxPort = tonumber(currentTxPort) 
-		local txDev = device.config{ port = currentTxPort }
+		local txDev = device.config({ port = currentTxPort })
 		txDev:wait()
 		txDev:getTxQueue(0):setRate(rate)
 		dpdk.launchLua("loadSlave", currentTxPort, 0, minIp, numIps)
@@ -25,36 +25,46 @@ end
 
 function loadSlave(port, queue, minA, numIPs)
 	--- parse and check ip addresses
+
 	local minIP, ipv4 = parseIPAddress(minA)
 	if minIP then
-		log:info("Detected an %s address.", minIP and "IPv4" or "IPv6")
+		printf("INFO: Detected an %s address.", minIP and "IPv4" or "IPv6")
 	else
-		log:fatal("Invalid minIP: %s", minA)
+		errorf("ERROR: Invalid minIP: %s", minA)
 	end
 
 	-- min TCP packet size for IPv6 is 74 bytes (+ CRC)
 	local packetLen = ipv4 and 60 or 74
 	
-	-- continue normally
+	--continue normally
 	local queue = device.get(port):getTxQueue(queue)
+	--local srcport = math.random(0, 2^16 - 1)
 	local mem = memory.createMemPool(function(buf)
 		buf:getTcpPacket(ipv4):fill{ 
-			ethSrc="90:e2:ba:2c:cb:02", ethDst="90:e2:ba:35:b5:81", 
-			ip4Dst="192.168.1.1", 
+			ethSrc="a0:36:9f:a1:4d:6d", ethDst="52:54:00:2E:62:A2", 
+			--- ip4Dst="10.9.1.2", 
+			ip4Dst="10.9.3.6", 
 			ip6Dst="fd06::1",
+			tcpDst="80",
+		--	tcpSrc="1029",
 			tcpSyn=1,
+		--	tcpRst=1,
 			tcpSeqNumber=1,
 			tcpWindow=10,
 			pktLength=packetLen }
 	end)
 
+	local lastPrint = dpdk.getTime()
+	local totalSent = 0
+	local lastTotal = 0
+	local lastSent = 0
 	local bufs = mem:bufArray(128)
 	local counter = 0
 	local c = 0
 
 	local txStats = stats:newDevTxCounter(queue, "plain")
 	while dpdk.running() do
-		-- fill packets and set their size 
+		-- faill packets and set their size 
 		bufs:alloc(packetLen)
 		for i, buf in ipairs(bufs) do 			
 			local pkt = buf:getTcpPacket(ipv4)
@@ -63,6 +73,8 @@ function loadSlave(port, queue, minA, numIPs)
 			if ipv4 then
 				pkt.ip4.src:set(minIP)
 				pkt.ip4.src:add(counter)
+				--random source port
+				pkt.tcp.src = math.random(0, 2^16 - 1)
 			else
 				pkt.ip6.src:set(minIP)
 				pkt.ip6.src:add(counter)
@@ -78,8 +90,10 @@ function loadSlave(port, queue, minA, numIPs)
 		--offload checksums to NIC
 		bufs:offloadTcpChecksums(ipv4)
 		
-		queue:send(bufs)
+		totalSent = totalSent + queue:send(bufs)
 		txStats:update()
 	end
 	txStats:finalize()
 end
+
+
